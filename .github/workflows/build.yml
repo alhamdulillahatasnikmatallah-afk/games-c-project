@@ -1,0 +1,125 @@
+
+name: Build C Project APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate or extract Flutter project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=""
+
+          # First, check whether the project is already extracted.
+          PROJECT_DIR="$(find . \
+            -type f -name pubspec.yaml \
+            -not -path './.git/*' \
+            -not -path './_source/*' \
+            -print -quit | xargs -r dirname)"
+
+          # If not found, extract an uploaded ZIP.
+          if [ -z "$PROJECT_DIR" ]; then
+            ZIP_FILE="$(find . -maxdepth 3 \
+              -type f -iname '*.zip' \
+              -not -path './_source/*' \
+              -print -quit)"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "::error::No Flutter project or ZIP found."
+              exit 1
+            fi
+
+            mkdir -p _source
+            unzip -oq "$ZIP_FILE" -d _source
+
+            PROJECT_DIR="$(find _source \
+              -type f -name pubspec.yaml \
+              -print -quit | xargs -r dirname)"
+          fi
+
+          if [ -z "$PROJECT_DIR" ] || \
+             [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "::error::pubspec.yaml was not found, even after extraction."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Flutter project found at: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android platform
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          flutter create \
+            --platforms=android \
+            --org=com.cproject \
+            --project-name=cend_dolphin \
+            .
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          flutter pub get
+
+      - name: Apply Android configuration
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          if [ -f tool/patch_android.py ]; then
+            python3 tool/patch_android.py
+          else
+            echo "::error::tool/patch_android.py not found"
+            exit 1
+          fi
+
+      - name: Analyze Flutter code
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          flutter analyze
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          flutter build apk --debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-project-debug-apk
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+          
