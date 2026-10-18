@@ -1,0 +1,166 @@
+
+name: Build C Project APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize error report
+        run: |
+          mkdir -p diagnostics
+          {
+            echo "C PROJECT - BUILD DIAGNOSTIC REPORT"
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Commit: $GITHUB_SHA"
+            echo "Date: $(date -u)"
+            echo
+          } > diagnostics/ERROR_REPORT.txt
+
+      - name: Locate or extract Flutter project
+        id: locate
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR=""
+
+          PROJECT_DIR="$(find . \
+            -type f -name pubspec.yaml \
+            -not -path './.git/*' \
+            -not -path './diagnostics/*' \
+            -print -quit | xargs -r dirname)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            ZIP_FILE="$(find . -maxdepth 3 \
+              -type f -iname '*.zip' \
+              -not -path './diagnostics/*' \
+              -print -quit)"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "::error::No Flutter project or ZIP found."
+              exit 1
+            fi
+
+            mkdir -p _source
+            unzip -oq "$ZIP_FILE" -d _source
+
+            PROJECT_DIR="$(find _source \
+              -type f -name pubspec.yaml \
+              -print -quit | xargs -r dirname)"
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::pubspec.yaml not found, including inside ZIP."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          {
+            echo "Project directory: $PROJECT_DIR"
+            echo "pubspec.yaml found."
+            echo
+          } >> diagnostics/ERROR_REPORT.txt
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android platform
+        run: |
+          cd "$PROJECT_DIR"
+          flutter create \
+            --platforms=android \
+            --org=com.cproject \
+            --project-name=cend_dolphin \
+            .
+
+      - name: Install dependencies
+        run: |
+          cd "$PROJECT_DIR"
+          flutter pub get
+
+      - name: Apply Android configuration
+        run: |
+          cd "$PROJECT_DIR"
+          if [ -f tool/patch_android.py ]; then
+            python3 tool/patch_android.py
+          else
+            echo "::error::tool/patch_android.py not found"
+            exit 1
+          fi
+
+      - name: Analyze Flutter code
+        run: |
+          cd "$PROJECT_DIR"
+          flutter analyze
+
+      - name: Build debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          flutter build apk --debug
+
+      - name: Capture failure details
+        if: ${{ failure() }}
+        run: |
+          {
+            echo
+            echo "BUILD STATUS: FAILED"
+            echo "Failed step: inspect the job log for the first red step."
+            echo
+            echo "Repository files:"
+            find . -maxdepth 4 -type f \
+              -not -path './.git/*' \
+              -not -path './_source/*' \
+              | head -200
+            echo
+            echo "Flutter/Dart diagnostic files:"
+            if [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ]; then
+              find "$PROJECT_DIR" -type f \
+                \( -name '*.log' -o -name '*.dill' \) \
+                -print | head -100
+            fi
+          } >> diagnostics/ERROR_REPORT.txt
+
+      - name: Upload error report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-project-error-report
+          path: diagnostics/ERROR_REPORT.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload debug APK
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-project-debug-apk
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+          
